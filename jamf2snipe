@@ -55,6 +55,7 @@ import configparser
 import argparse
 import logging
 import datetime
+from dateutil.relativedelta import relativedelta
 
 # Set us up for using runtime arguments by defining them.
 runtimeargs = argparse.ArgumentParser()
@@ -200,7 +201,7 @@ def request_jamf_token():
     global expires_time
     token_request_time = time.time()
     logging.info("Requesting a new token at {}.".format(token_request_time))
-    api_url = '{0}/api/v1/auth/token'.format(jamfpro_base)
+    api_url = '{0}/api/auth/tokens'.format(jamfpro_base)
     # No hook for this api call.
     logging.debug('Calling for a token against: {}\n The username and password can be found earlier in the script.'.format(api_url))
     # No hook for this API call.
@@ -211,11 +212,11 @@ def request_jamf_token():
         logging.debug(jsonresponse)
         # So we have our token and Expires time. Set the expires time globably so we can reset later. 
         try:
-            expires_time = datetime.datetime.fromisoformat(jsonresponse['expires'].replace("Z", "+00:00"))
+            expires_time = datetime.datetime.fromtimestamp(jsonresponse['expires'], datetime.timezone.utc)
         except:
             # APIs are awful and Jamf doesn't always send enough ms digits. UGH. 
             try:
-                expires_time = datetime.datetime.fromisoformat(jsonresponse['expires'].replace("Z", "0+00:00"))
+                expires_time = datetime.datetime.fromtimestamp(jsonresponse['expires']/1000, datetime.timezone.utc)
             except:
                 logging.error("Jamf sent a malformed timestamp: {}\n Please feel free to complain to Jamf support.".format(jsonresponse['expires']))
                 raise SystemExit("Unable to grok Jamf Timestamp - Exiting")
@@ -349,6 +350,56 @@ def get_jamf_mobiles_by_group(jamf_id):
         logging.debug("Returning a null value for the function.")
         return None
 
+# Function to make the API call for all JAMF mobile devices in group
+def get_jamf_mobiles_from_date(report_id, date_after):
+    date_before = (datetime.datetime.today() + relativedelta(months=1)).strftime('%Y-%m-%d')
+    if modify_jamf_date_report(report_id, date_before, date_after) is None:
+        return None
+
+    logging.info("getting mobiles from {} to {}".format(date_after, date_before))
+    api_url = '{0}/JSSResource/advancedmobiledevicesearches/id/{1}'.format(jamfpro_base, report_id)
+    logging.debug('Calling for JAMF mobiles against: {}\n The username, passwords, and headers for this GET requestcan be found near the beginning of the output.'.format(api_url))
+    response = requests.get(api_url, headers=jamfheaders, verify=user_args.do_not_verify_ssl, hooks={'response': request_handler})
+    if response.status_code == 200:
+        logging.debug("Got back a valid 200 response code.")
+        jsonresponse = response.json()
+        logging.debug("Returning: {}".format(jsonresponse['advanced_mobile_device_search']))
+        return jsonresponse['advanced_mobile_device_search']
+    elif b'policies.ratelimit.QuotaViolation' in response.content:
+        logging.info('JAMFPro responded with error code: {} - Policy Ratelimit Quota Violation - when we tried to get a list of mobiles Waiting a bit to retry the lookup.'.format(response))
+        logging.warning('JAMFPro Ratelimit exceeded: pausing ')
+        time.sleep(75)
+        logging.info("Finished waiting. Retrying lookup...")
+        newresponse = get_jamf_mobiles_from_date(report_id, date_after)
+        return newresponse
+    else:
+        logging.warning('Received an invalid status code when trying to retreive JAMF Device list:{} - {}'.format(response.status_code, response.content))
+        logging.debug("Returning a null value for the function.")
+        return None
+
+# Function to make the API call for all JAMF mobile devices in group
+def modify_jamf_date_report(report_id, date_before, date_after):
+    api_url = '{0}/api/v1/advanced-mobile-device-searches/{1}'.format(jamfpro_base, report_id)
+    payload = json.dumps({"id":report_id,"name":"All_dev_editable","criteria":[{"name":"Last Inventory Update","priority":0,"andOr":"and","searchType":"before (yyyy-mm-dd)","value":date_before,"openingParen":False,"closingParen":False},{"name":"Last Inventory Update","priority":0,"andOr":"and","searchType":"after (yyyy-mm-dd)","value":date_after,"openingParen":False,"closingParen":False}],"displayFields":[],"siteId":"-1"})
+    logging.debug('Making Get request against: {}\nPayload for the PUT request is: {}\nThe username, password, and headers can be found near the beginning of the output.'.format(api_url, payload))
+    response = requests.put(api_url, data=payload, headers=jamfheaders, verify=user_args.do_not_verify_ssl, hooks={'response': request_handler})
+    if response.status_code == 201:
+        logging.debug("Got a 201 response. Returning: True")
+        return True
+    elif b'policies.ratelimit.QuotaViolation' in response.content:
+        logging.info('JAMFPro responded with error code: {} - Policy Ratelimit Quota Violation - when we tried to look up id: {} Waiting a bit to retry the lookup.'.format(response, jamf_id))
+        logging.warning('JAMFPro Ratelimit exceeded: pausing ')
+        time.sleep(75)
+        logging.info("Finished waiting. Retrying update...")
+        newresponse = modify_jamf_date_report(report_id, date_before, date_after)
+        return newresponse
+    if response.status_code == 200:
+        logging.debug("Got a 200 response code. Returning the response: {}".format(response))
+        return response.json()
+    else:
+        logging.warning('Got back an error response code:{} - {}'.format(response.status_code, response.content))
+        return None
+
 # Function to lookup a JAMF asset by id.
 def search_jamf_asset(jamf_id):
     api_url = "{}/JSSResource/computers/id/{}".format(jamfpro_base, jamf_id)
@@ -366,7 +417,7 @@ def search_jamf_asset(jamf_id):
         newresponse = search_jamf_asset(jamf_id)
         return newresponse
     else:
-        logging.warning('JAMFPro responded with error code:{} when we tried to look up id: {}'.format(response, jamf_id))
+        logging.warning('JAMFPro responded with error code:{}:{} when we tried to look up id: {}'.format(response, response.text, jamf_id))
         logging.debug("Returning a null value for the function.")
         return None
 
@@ -387,7 +438,7 @@ def search_jamf_mobile(jamf_id):
         newresponse = search_jamf_asset(jamf_id)
         return newresponse
     else:
-        logging.warning('JAMFPro responded with error code:{} when we tried to look up id: {}'.format(response, jamf_id))
+        logging.warning('JAMFPro responded with error code:{}:{} when we tried to look up id: {}'.format(response, response.text, jamf_id))
         logging.debug("Returning a null value for the function.")
         return None
 
@@ -448,13 +499,15 @@ def search_snipe_asset(serial):
             if jsonresponse['total'] == 1:
                 return jsonresponse
             elif jsonresponse['total'] == 0:
-                logging.info("No assets match {}".format(serial))
+                logging.info("0 assets match {}".format(serial))
+                logging.debug(response.text)
                 return "NoMatch"
             else:
                 logging.warning('FOUND {} matching assets while searching for: {}'.format(jsonresponse['total'], serial))
                 return "MultiMatch"
         else:
             logging.info("No assets match {}".format(serial))
+            logging.debug(response.text)
             return "NoMatch"
     else:
         logging.warning('Snipe-IT responded with error code:{} when we tried to look up: {}'.format(response.text, serial))
@@ -706,7 +759,12 @@ if 'mobile_group_id' in config['jamf'] and config['jamf']['mobile_group_id']:
     logging.info("Getting list of mobiles from JAMF by mobile group id.")
     jamf_mobile_list = get_jamf_mobiles_by_group(config['jamf']['mobile_group_id'])
 else:
-    jamf_mobile_list = get_jamf_mobiles()
+    jamf_mobile_list = []
+    if config['jamf'].get('sync_days', None) and config['jamf'].get('report_id', None):
+        date_after = (datetime.datetime.today() - relativedelta(days=int(config['jamf']['sync_days']))).strftime('%Y-%m-%d')
+        jamf_mobile_list = get_jamf_mobiles_from_date(config['jamf']['report_id'], date_after)
+    else:
+        jamf_mobile_list = get_jamf_mobiles()
 jamf_types = {
     'computers': jamf_computer_list,
     'mobile_devices': jamf_mobile_list
@@ -726,6 +784,7 @@ elif user_args.mobiles:
 else:
     for jamf_type in jamf_types:
         TotalNumber += len(jamf_types[jamf_type][jamf_type])
+        logging.info("{}: {}".format(jamf_type, len(jamf_types[jamf_type][jamf_type])))
 
 # Make sure we have a good list.
 if jamf_computer_list != None:
@@ -751,7 +810,7 @@ for jamf_type in jamf_types:
             continue
     for jamf_asset in jamf_types[jamf_type][jamf_type]:
         CurrentNumber += 1
-        logging.info("Processing entry {} out of {} - JAMFID: {} - NAME: {}".format(CurrentNumber, TotalNumber, jamf_asset['id'], jamf_asset['name']))
+        logging.info("Processing entry {} out of {} - JAMFID: {} - NAME: {} - UPDATED: {}".format(CurrentNumber, TotalNumber, jamf_asset['id'], jamf_asset['name'], jamf_asset.get('Last Inventory Update', "--")))
         # Search through the list by ID for all asset information\
         if jamf_type == 'computers':
             jamf = search_jamf_asset(jamf_asset['id'])
@@ -793,7 +852,7 @@ for jamf_type in jamf_types:
         if snipe == 'NoMatch':
             logging.info("Creating a new asset in snipe for JAMF ID {} - {}".format(jamf['general']['id'], jamf['general']['name']))
             # This section checks to see if the asset tag was already put into JAMF, if not it creates one with with Jamf's ID.
-            if jamf['general']['asset_tag'] == '':
+            if not jamf['general']['asset_tag'] or str(jamf['general']['asset_tag']).lower() == 'unassigned' or str(jamf['general']['asset_tag']).lower() == 'unknown' or str(jamf['general']['asset_tag']).lower() == 'asset_tag':
                 jamf_asset_tag = None
                 logging.debug('No asset tag found in Jamf, checking settings.conf for alternative specified field.')
                 if 'asset_tag' in config['snipe-it']:

@@ -1,5 +1,5 @@
-# jamf2snipe
-## Import/Sync Computers from JAMF to Snipe-IT
+# jamf2snipe-custom
+## fork of original jamf2stipe by @grokability. Import/Sync Computers from JAMF to Snipe-IT
 ```
 usage: jamf2snipe [-h] [-v] [--auto_incrementing] [--dryrun] [-d] [--do_not_update_jamf] [--do_not_verify_ssl] [-r] [-f] [--version] [-u | -ui | -uf] [-uns] [-m | -c]
 

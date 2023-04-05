@@ -3,6 +3,8 @@
 url = https://yourinstance.jamfcloud.com
 username = yourJamfUsername
 password = $ecretJ@mfPassw0rd
+report_id = 7
+sync_days = 2
 
 [snipe-it]
 #Required
